@@ -64,6 +64,10 @@ class TransmuxingController {
             // params needed by IOController
             segment.cors = mediaDataSource.cors;
             segment.withCredentials = mediaDataSource.withCredentials;
+            // referrer policy control, if exist
+            if (config.referrerPolicy) {
+                segment.referrerPolicy = config.referrerPolicy;
+            }
         });
 
         if (!isNaN(totalDuration) && this._mediaDataSource.duration !== totalDuration) {
@@ -126,6 +130,7 @@ class TransmuxingController {
         ioctl.onError = this._onIOException.bind(this);
         ioctl.onSeeked = this._onIOSeeked.bind(this);
         ioctl.onComplete = this._onIOComplete.bind(this);
+        ioctl.onRedirect = this._onIORedirect.bind(this);
         ioctl.onRecoveredEarlyEof = this._onIORecoveredEarlyEof.bind(this);
 
         if (optionalFrom) {
@@ -249,10 +254,19 @@ class TransmuxingController {
             if (mds.duration != undefined && !isNaN(mds.duration)) {
                 this._demuxer.overridedDuration = mds.duration;
             }
+            if (typeof mds.hasAudio === 'boolean') {
+                this._demuxer.overridedHasAudio = mds.hasAudio;
+            }
+            if (typeof mds.hasVideo === 'boolean') {
+                this._demuxer.overridedHasVideo = mds.hasVideo;
+            }
+
             this._demuxer.timestampBase = mds.segments[this._currentSegmentIndex].timestampBase;
 
             this._demuxer.onError = this._onDemuxException.bind(this);
             this._demuxer.onMediaInfo = this._onMediaInfo.bind(this);
+            this._demuxer.onMetaDataArrived = this._onMetaDataArrived.bind(this);
+            this._demuxer.onScriptDataArrived = this._onScriptDataArrived.bind(this);
 
             this._remuxer.bindDataSource(this._demuxer
                          .bindDataSource(this._ioctl
@@ -302,6 +316,14 @@ class TransmuxingController {
         }
     }
 
+    _onMetaDataArrived(metadata) {
+        this._emitter.emit(TransmuxingEvents.METADATA_ARRIVED, metadata);
+    }
+
+    _onScriptDataArrived(data) {
+        this._emitter.emit(TransmuxingEvents.SCRIPTDATA_ARRIVED, data);
+    }
+
     _onIOSeeked() {
         this._remuxer.insertDiscontinuity();
     }
@@ -312,11 +334,18 @@ class TransmuxingController {
 
         if (nextSegmentIndex < this._mediaDataSource.segments.length) {
             this._internalAbort();
+            this._remuxer.flushStashedSamples();
             this._loadSegment(nextSegmentIndex);
         } else {
+            this._remuxer.flushStashedSamples();
             this._emitter.emit(TransmuxingEvents.LOADING_COMPLETE);
             this._disableStatisticsReporter();
         }
+    }
+
+    _onIORedirect(redirectedURL) {
+        let segmentIndex = this._ioctl.extraData;
+        this._mediaDataSource.segments[segmentIndex].redirectedURL = redirectedURL;
     }
 
     _onIORecoveredEarlyEof() {
@@ -391,7 +420,12 @@ class TransmuxingController {
     _reportStatisticsInfo() {
         let info = {};
 
-        info.url = this._ioctl.currentUrl;
+        info.url = this._ioctl.currentURL;
+        info.hasRedirect = this._ioctl.hasRedirect;
+        if (info.hasRedirect) {
+            info.redirectedURL = this._ioctl.currentRedirectedURL;
+        }
+
         info.speed = this._ioctl.currentSpeed;
         info.loaderType = this._ioctl.loaderType;
         info.currentSegmentIndex = this._currentSegmentIndex;

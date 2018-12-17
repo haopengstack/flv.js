@@ -36,11 +36,12 @@ class RangeLoader extends BaseLoader {
         }
     }
 
-    constructor(seekHandler) {
+    constructor(seekHandler, config) {
         super('xhr-range-loader');
         this.TAG = 'RangeLoader';
 
         this._seekHandler = seekHandler;
+        this._config = config;
         this._needStash = false;
 
         this._chunkSizeKBList = [
@@ -57,6 +58,8 @@ class RangeLoader extends BaseLoader {
         this._waitForTotalLength = false;
         this._totalLengthReceived = false;
 
+        this._currentRequestURL = null;
+        this._currentRedirectedURL = null;
         this._currentRequestRange = null;
         this._totalLength = null;  // size of the entire file
         this._contentLength = null;  // Content-Length of entire request range
@@ -87,7 +90,13 @@ class RangeLoader extends BaseLoader {
         this._range = range;
         this._status = LoaderStatus.kConnecting;
 
-        if (!this._totalLengthReceived) {
+        let useRefTotalLength = false;
+        if (this._dataSource.filesize != undefined && this._dataSource.filesize !== 0) {
+            useRefTotalLength = true;
+            this._totalLength = this._dataSource.filesize;
+        }
+
+        if (!this._totalLengthReceived && !useRefTotalLength) {
             // We need total filesize
             this._waitForTotalLength = true;
             this._internalOpen(this._dataSource, {from: 0, to: -1});
@@ -116,7 +125,17 @@ class RangeLoader extends BaseLoader {
     _internalOpen(dataSource, range) {
         this._lastTimeLoaded = 0;
 
-        let seekConfig = this._seekHandler.getConfig(dataSource.url, range);
+        let sourceURL = dataSource.url;
+        if (this._config.reuseRedirectedURL) {
+            if (this._currentRedirectedURL != undefined) {
+                sourceURL = this._currentRedirectedURL;
+            } else if (dataSource.redirectedURL != undefined) {
+                sourceURL = dataSource.redirectedURL;
+            }
+        }
+
+        let seekConfig = this._seekHandler.getConfig(sourceURL, range);
+        this._currentRequestURL = seekConfig.url;
 
         let xhr = this._xhr = new XMLHttpRequest();
         xhr.open('GET', seekConfig.url, true);
@@ -126,12 +145,23 @@ class RangeLoader extends BaseLoader {
         xhr.onload = this._onLoad.bind(this);
         xhr.onerror = this._onXhrError.bind(this);
 
-        if (dataSource.withCredentials && xhr['withCredentials']) {
+        if (dataSource.withCredentials) {
             xhr.withCredentials = true;
         }
 
         if (typeof seekConfig.headers === 'object') {
             let headers = seekConfig.headers;
+
+            for (let key in headers) {
+                if (headers.hasOwnProperty(key)) {
+                    xhr.setRequestHeader(key, headers[key]);
+                }
+            }
+        }
+
+        // add additional headers
+        if (typeof this._config.headers === 'object') {
+            let headers = this._config.headers;
 
             for (let key in headers) {
                 if (headers.hasOwnProperty(key)) {
@@ -164,7 +194,17 @@ class RangeLoader extends BaseLoader {
         let xhr = e.target;
 
         if (xhr.readyState === 2) {  // HEADERS_RECEIVED
-            if ((xhr.status >= 200 && xhr.status < 300)) {
+            if (xhr.responseURL != undefined) {  // if the browser support this property
+                let redirectedURL = this._seekHandler.removeURLParameters(xhr.responseURL);
+                if (xhr.responseURL !== this._currentRequestURL && redirectedURL !== this._currentRedirectedURL) {
+                    this._currentRedirectedURL = redirectedURL;
+                    if (this._onURLRedirect) {
+                        this._onURLRedirect(redirectedURL);
+                    }
+                }
+            }
+
+            if ((xhr.status >= 200 && xhr.status <= 299)) {
                 if (this._waitForTotalLength) {
                     return;
                 }
@@ -181,6 +221,11 @@ class RangeLoader extends BaseLoader {
     }
 
     _onProgress(e) {
+        if (this._status === LoaderStatus.kError) {
+            // Ignore error response
+            return;
+        }
+
         if (this._contentLength === null) {
             let openNextRange = false;
 
@@ -241,6 +286,11 @@ class RangeLoader extends BaseLoader {
     }
 
     _onLoad(e) {
+        if (this._status === LoaderStatus.kError) {
+            // Ignore error response
+            return;
+        }
+
         if (this._waitForTotalLength) {
             this._waitForTotalLength = false;
             return;

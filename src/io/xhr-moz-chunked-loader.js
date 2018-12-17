@@ -36,11 +36,12 @@ class MozChunkedLoader extends BaseLoader {
         }
     }
 
-    constructor(seekHandler) {
+    constructor(seekHandler, config) {
         super('xhr-moz-chunked-loader');
         this.TAG = 'MozChunkedLoader';
 
         this._seekHandler = seekHandler;
+        this._config = config;
         this._needStash = true;
 
         this._xhr = null;
@@ -67,7 +68,13 @@ class MozChunkedLoader extends BaseLoader {
         this._dataSource = dataSource;
         this._range = range;
 
-        let seekConfig = this._seekHandler.getConfig(dataSource.url, range);
+        let sourceURL = dataSource.url;
+        if (this._config.reuseRedirectedURL && dataSource.redirectedURL != undefined) {
+            sourceURL = dataSource.redirectedURL;
+        }
+
+        let seekConfig = this._seekHandler.getConfig(sourceURL, range);
+        this._requestURL = seekConfig.url;
 
         let xhr = this._xhr = new XMLHttpRequest();
         xhr.open('GET', seekConfig.url, true);
@@ -80,12 +87,23 @@ class MozChunkedLoader extends BaseLoader {
         // cors is auto detected and enabled by xhr
 
         // withCredentials is disabled by default
-        if (dataSource.withCredentials && xhr['withCredentials']) {
+        if (dataSource.withCredentials) {
             xhr.withCredentials = true;
         }
 
         if (typeof seekConfig.headers === 'object') {
             let headers = seekConfig.headers;
+
+            for (let key in headers) {
+                if (headers.hasOwnProperty(key)) {
+                    xhr.setRequestHeader(key, headers[key]);
+                }
+            }
+        }
+
+        // add additional headers
+        if (typeof this._config.headers === 'object') {
+            let headers = this._config.headers;
 
             for (let key in headers) {
                 if (headers.hasOwnProperty(key)) {
@@ -110,6 +128,13 @@ class MozChunkedLoader extends BaseLoader {
         let xhr = e.target;
 
         if (xhr.readyState === 2) {  // HEADERS_RECEIVED
+            if (xhr.responseURL != undefined && xhr.responseURL !== this._requestURL) {
+                if (this._onURLRedirect) {
+                    let redirectedURL = this._seekHandler.removeURLParameters(xhr.responseURL);
+                    this._onURLRedirect(redirectedURL);
+                }
+            }
+
             if (xhr.status !== 0 && (xhr.status < 200 || xhr.status > 299)) {
                 this._status = LoaderStatus.kError;
                 if (this._onError) {
@@ -124,6 +149,11 @@ class MozChunkedLoader extends BaseLoader {
     }
 
     _onProgress(e) {
+        if (this._status === LoaderStatus.kError) {
+            // Ignore error response
+            return;
+        }
+
         if (this._contentLength === null) {
             if (e.total !== null && e.total !== 0) {
                 this._contentLength = e.total;

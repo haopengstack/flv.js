@@ -48,9 +48,6 @@ class IOController {
         this._extraData = extraData;
 
         this._stashInitialSize = 1024 * 384;  // default initial size: 384KB
-        if (config.isLive === true) {
-            this._stashInitialSize = 1024 * 512;  // default live initial size: 512KB
-        }
         if (config.stashInitialSize != undefined && config.stashInitialSize > 0) {
             // apply from config
             this._stashInitialSize = config.stashInitialSize;
@@ -71,11 +68,12 @@ class IOController {
         this._seekHandler = null;
 
         this._dataSource = dataSource;
-        this._isWebSocketURL = /wss?:\/\/(.+?)\//.test(dataSource.url);
+        this._isWebSocketURL = /wss?:\/\/(.+?)/.test(dataSource.url);
         this._refTotalLength = dataSource.filesize ? dataSource.filesize : null;
         this._totalLength = this._refTotalLength;
         this._fullRequestFlag = false;
         this._currentRange = null;
+        this._redirectedURL = null;
 
         this._speedNormalized = 0;
         this._speedSampler = new SpeedSampler();
@@ -90,6 +88,7 @@ class IOController {
         this._onSeeked = null;
         this._onError = null;
         this._onComplete = null;
+        this._onRedirect = null;
         this._onRecoveredEarlyEof = null;
 
         this._selectSeekHandler();
@@ -116,6 +115,7 @@ class IOController {
         this._onSeeked = null;
         this._onError = null;
         this._onComplete = null;
+        this._onRedirect = null;
         this._onRecoveredEarlyEof = null;
 
         this._extraData = null;
@@ -175,6 +175,14 @@ class IOController {
         this._onComplete = callback;
     }
 
+    get onRedirect() {
+        return this._onRedirect;
+    }
+
+    set onRedirect(callback) {
+        this._onRedirect = callback;
+    }
+
     get onRecoveredEarlyEof() {
         return this._onRecoveredEarlyEof;
     }
@@ -183,8 +191,16 @@ class IOController {
         this._onRecoveredEarlyEof = callback;
     }
 
-    get currentUrl() {
+    get currentURL() {
         return this._dataSource.url;
+    }
+
+    get hasRedirect() {
+        return (this._redirectedURL != null || this._dataSource.redirectedURL != undefined);
+    }
+
+    get currentRedirectedURL() {
+        return this._redirectedURL || this._dataSource.redirectedURL;
     }
 
     // in KB/s
@@ -221,7 +237,9 @@ class IOController {
     }
 
     _selectLoader() {
-        if (this._isWebSocketURL) {
+        if (this._config.customLoader != null) {
+            this._loaderClass = this._config.customLoader;
+        } else if (this._isWebSocketURL) {
             this._loaderClass = WebSocketLoader;
         } else if (FetchStreamLoader.isSupported()) {
             this._loaderClass = FetchStreamLoader;
@@ -235,11 +253,12 @@ class IOController {
     }
 
     _createLoader() {
-        this._loader = new this._loaderClass(this._seekHandler);
+        this._loader = new this._loaderClass(this._seekHandler, this._config);
         if (this._loader.needStashBuffer === false) {
             this._enableStash = false;
         }
         this._loader.onContentLengthKnown = this._onContentLengthKnown.bind(this);
+        this._loader.onURLRedirect = this._onURLRedirect.bind(this);
         this._loader.onDataArrival = this._onLoaderChunkArrival.bind(this);
         this._loader.onComplete = this._onLoaderComplete.bind(this);
         this._loader.onError = this._onLoaderError.bind(this);
@@ -417,6 +436,13 @@ class IOController {
     _dispatchChunks(chunks, byteStart) {
         this._currentRange.to = byteStart + chunks.byteLength - 1;
         return this._onDataArrival(chunks, byteStart);
+    }
+
+    _onURLRedirect(redirectedURL) {
+        this._redirectedURL = redirectedURL;
+        if (this._onRedirect) {
+            this._onRedirect(redirectedURL);
+        }
     }
 
     _onContentLengthKnown(contentLength) {
